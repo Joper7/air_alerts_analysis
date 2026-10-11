@@ -1,0 +1,16 @@
+# дані (великі, відтворюються data_loader-ом)
+data/
+
+# Telegram-сесія = повний доступ до акаунта
+*.session
+*.session-journal
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# секрети
+.env
