@@ -172,14 +172,17 @@ def build(source: str = "volunteer", force: bool = False) -> pd.DataFrame:
     """
     -> data/processed/hourly_<source>.parquet, intervals_<source>.parquet, meta_<source>.json
 
-    data_cutoff = момент скачування − 24 год. Тривога, що ще триває в момент
-    скачування, у CSV відсутня -> її години виглядали б як 0 (хибні негативи
-    в кінці тесту). Обрізаємо хвіст на MAX_DURATION_H.
+    data_cutoff = min(момент скачування, останній started_at у CSV) − 24 год.
+    Тривога, що ще триває в момент оновлення датасету, у CSV відсутня -> її
+    години виглядали б як 0 (хибні негативи в кінці тесту). Якщо апстрім
+    відстає (official — на місяць), рахувати від mtime не можна: весь хвіст
+    після останнього оновлення був би фальшивими нулями.
     """
     loader = {"volunteer": load_volunteer, "official": load_official}[source]
     intervals = loader(force)
     snap = snapshot_time(SOURCE_FILES[source])
-    data_cutoff = snap - pd.Timedelta(hours=MAX_DURATION_H)
+    last_seen = intervals["started_at"].max().floor("h")
+    data_cutoff = min(snap, last_seen) - pd.Timedelta(hours=MAX_DURATION_H)
 
     hourly = to_hourly(intervals, end=snap)          # тихі години після останньої тривоги = 0
     hourly = hourly[hourly["hour_utc"] < data_cutoff].reset_index(drop=True)
@@ -192,6 +195,7 @@ def build(source: str = "volunteer", force: bool = False) -> pd.DataFrame:
     meta = {
         "source": source,
         "snapshot_utc": str(snap),
+        "last_started_utc": str(last_seen),
         "data_cutoff_utc": str(data_cutoff),
         "last_hour_utc": str(hourly["hour_utc"].max()),
         "n_intervals": int(len(intervals)),
