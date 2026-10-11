@@ -170,7 +170,9 @@ def run_horizon(hourly, intervals, h: int, kind: str = "window") -> dict:
         "best_iter": best_iters, "selected": sel,
     }
     imp = importance[sel].sort_values(ascending=False)
-    return dict(val=val_m, test=test_m, boot=pd.DataFrame(boot), rel=rel, info=info, imp=imp)
+    preds = te[["oblast", "hour_utc", "active_now", "target"]].assign(**test_preds)
+    return dict(val=val_m, test=test_m, boot=pd.DataFrame(boot), rel=rel, info=info, imp=imp,
+                preds=preds)
 
 
 # ---------------------------------------------------------------- report
@@ -208,6 +210,8 @@ def main(hs: list[int]) -> None:
     test.to_csv(REPORT_DIR / f"test_metrics_h{suffix}.csv", index=False)
     boot.to_csv(REPORT_DIR / f"bootstrap_h{suffix}.csv", index=False)
     rel.to_csv(REPORT_DIR / f"reliability_h{suffix}.csv", index=False)
+    for h, r in res.items():   # прогнози на test — для графіків і бектесту
+        r["preds"].to_parquet(REPORT_DIR / f"test_preds_h{h}.parquet", index=False)
 
     lines = [f"# Результати задачі A (h = {', '.join(map(str, hs))})",
              f"\nДжерело: volunteer, знімок {meta['snapshot_utc']}, сітка до {meta['data_cutoff_utc']}."]
