@@ -69,7 +69,7 @@ def test_no_leakage_truncation(h):
     cut_h = to_hourly(cut, end=end)
     trunc = make_features(cut_h, cut, h, start=start)
 
-    cols = [c for c in FEATURE_SETS["L1.5"] if c != "oblast"]
+    cols = [c for c in FEATURE_SETS["L1.5S"] if c != "oblast"]
     key = ["oblast", "hour_utc"]
     a = full[full["hour_utc"] <= t0].set_index(key)[cols].sort_index()
     b = trunc[trunc["hour_utc"] <= t0].set_index(key)[cols].sort_index()

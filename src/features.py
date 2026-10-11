@@ -54,7 +54,12 @@ L15_COLS = [
     "n_active_now", "d_n_active", "n_alert_lasthour", "n_alert_max_6h",
     "hours_since_mass", "mass_count_14d",
 ]
-FEATURE_SETS = {"L1": L1_COLS, "L1.5": L1_COLS + L15_COLS}
+# S — серії атак (по країні, «доба атаки» = полудень–полудень за Києвом)
+SERIES_COLS = ["nat_int_prev", "nat_int_today", "heavy_streak", "avg_heavy_len_90d",
+               "streak_vs_avg", "obl_int_prev"]
+FEATURE_SETS = {"L1": L1_COLS, "L1.5": L1_COLS + L15_COLS, "L1.5S": L1_COLS + L15_COLS + SERIES_COLS}
+ADAY_OFFSET = pd.Timedelta(hours=9)     # доба атаки = [09:00 UTC, 09:00 UTC наступного дня)
+AVG_LEN_PRIOR = 2.5                     # середня довжина важкої серії до появи історії
 
 
 # ---------------------------------------------------------------- стан з інтервалів
@@ -132,6 +137,60 @@ def online_markov(target: pd.DataFrame, active: pd.DataFrame, h: int,
     return active * p1 + (1 - active) * p0
 
 
+def _signed_streak(b: np.ndarray) -> np.ndarray:
+    """+k: k важких діб поспіль (включно з цією), −k: k спокійних поспіль."""
+    out, k = np.zeros(len(b)), 0
+    for i, v in enumerate(b):
+        k = (k + 1 if k > 0 else 1) if v else (k - 1 if k < 0 else -1)
+        out[i] = k
+    return out
+
+
+def series_features(Mn: pd.DataFrame, origins: pd.DatetimeIndex) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Серії атак. Доба атаки c = floor(t − 9 год); в origin t відомі лише завершені доби (≤ c−1)
+    + частина поточної доби до t.
+      важка доба         — область-години тривоги по країні > ковзної медіани 28 попередніх діб
+                           (адаптивний поріг → стійкий до дрейфу рівня);
+      nat_int_prev       — інтенсивність минулої доби / медіана;
+      nat_int_today      — інтенсивність поточної доби до моменту t / медіана;
+      heavy_streak       — +k важких / −k спокійних діб поспіль (обрізано до ±7);
+      avg_heavy_len_90d  — середня довжина завершених важких серій за 90 діб (онлайн);
+      streak_vs_avg      — поточна важка серія / середня довжина («наскільки серія вже затягнулась»);
+      obl_int_prev       — інтенсивність минулої доби в самій області / її медіана.
+    """
+    hours = Mn.sum(axis=1) / 60                                   # область-години в рядку r
+    block = (Mn.index - ADAY_OFFSET).floor("D")
+    daily = hours.groupby(block).sum()
+    med = daily.shift(1).rolling(28, min_periods=14).median()     # лише попередні доби
+    ratio = daily / med
+    heavy = (ratio > 1).to_numpy()
+    streak = pd.Series(_signed_streak(heavy), index=daily.index)
+    # довжина важкої серії, що закінчилась у добу d, стає відомою після доби d+1
+    ended = (streak.shift(1) > 0) & (streak <= 0)
+    lens = streak.shift(1).where(ended, 0.0)
+    cnt = ended.astype(float).rolling(90, min_periods=1).sum()
+    avg_len = (lens.rolling(90, min_periods=1).sum() / cnt).fillna(AVG_LEN_PRIOR)
+
+    obl_daily = Mn.groupby(block).sum() / 60
+    obl_ratio = (obl_daily + 0.5) / (obl_daily.shift(1).rolling(28, min_periods=14).median() + 0.5)
+
+    c = (origins - ADAY_OFFSET).floor("D")
+    prev = c - pd.Timedelta(days=1)
+    st = streak.reindex(prev).clip(-7, 7).to_numpy()
+    al = avg_len.reindex(prev).to_numpy()
+    cum = (hours.groupby(block).cumsum() - hours).to_numpy()     # рядки [початок доби, t)
+    nat = pd.DataFrame({
+        "nat_int_prev": ratio.reindex(prev).to_numpy(),
+        "nat_int_today": cum / med.reindex(c).to_numpy(),
+        "heavy_streak": st,
+        "avg_heavy_len_90d": al,
+        "streak_vs_avg": np.clip(st, 0, None) / al,
+    }, index=origins)
+    obl = obl_ratio.reindex(prev).set_axis(origins)
+    return nat, obl
+
+
 # ---------------------------------------------------------------- датасет
 def make_features(hourly: pd.DataFrame, intervals: pd.DataFrame, h: int,
                   kind: str = "window", scope: list[str] = SCOPE,
@@ -162,6 +221,8 @@ def make_features(hourly: pd.DataFrame, intervals: pd.DataFrame, h: int,
     hours_since_mass = (pos - last_mass).fillna(24 * HISTORY_DAYS)
     mass_onset = (mass_row & ~mass_row.shift(1, fill_value=False)).astype(float)
     mass_count_14d = mass_onset.shift(1).rolling(24 * 14, min_periods=1).sum()
+
+    ser_nat, ser_obl = series_features(Mn, origins)
 
     local_t = origins.tz_convert(KYIV_TZ)
     local_tgt = (origins + (h - 1) * H).tz_convert(KYIV_TZ)   # календар цільової години — детермінований
@@ -195,6 +256,9 @@ def make_features(hourly: pd.DataFrame, intervals: pd.DataFrame, h: int,
             "n_alert_max_6h": n_alert_lasthour.rolling(6).max(),
             "hours_since_mass": hours_since_mass,
             "mass_count_14d": mass_count_14d,
+            # S
+            **{k: ser_nat[k] for k in ser_nat.columns},
+            "obl_int_prev": ser_obl[ob],
             "target": target[ob],
         }
         f = pd.DataFrame(d, index=origins).reset_index(drop=True)

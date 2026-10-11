@@ -145,14 +145,15 @@ def run_horizon(hourly, intervals, h: int, kind: str = "window") -> dict:
     # Вибір фінального варіанта ЛИШЕ за val (onset log-loss) серед LightGBM на L1.5
     cand = val_m[(val_m["slice"] == "onset") & val_m["model"].str.startswith("lgb_L1.5")]
     sel = cand.sort_values("logloss")["model"].iloc[0]
-    sel_l1 = sel.replace("L1.5", "L1")                    # та сама модель без L1.5 — для абляції
+    variant = "_".join(sel.split("_")[2:])                 # абляція: той самий варіант на інших наборах
+    ablation = [f"lgb_{fs}_{variant}" for fs in FEATURE_SETS]
     for m in (val_m, test_m):
         m["selected"] = m["model"] == sel
 
     onset = (te["active_now"] == 0).to_numpy()
     boot = []
-    for a, b in [(sel, "markov28"), (sel, "clim"), (sel, sel_l1), (sel, "logreg_L1.5"),
-                 (sel, "lgb_L1.5_plain")]:
+    pairs = [(sel, "markov28"), (sel, "clim"), (sel, "logreg_L1.5")] + [(sel, a) for a in ablation]
+    for a, b in pairs:
         if a == b:
             continue
         for sl, m in (("all", None), ("onset", onset)):

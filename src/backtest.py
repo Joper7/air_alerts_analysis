@@ -36,11 +36,11 @@ PRED_START = pd.Timestamp("2026-02-01", tz="UTC")   # ≈3 міс. історі�
 REFIT_EVERY = pd.Timedelta(days=7)
 N_TREES = 150
 CAL_WINDOWS = (7, 14, 28, 56)
-COLS = FEATURE_SETS["L1.5"]
+BT_SETS = ("L1.5", "L1.5S")
 
 
 # ---------------------------------------------------------------- walk-forward
-def walk_forward(df: pd.DataFrame, h: int) -> pd.Series:
+def walk_forward(df: pd.DataFrame, h: int, cols: list[str]) -> pd.Series:
     """Out-of-sample p_raw для origin ≥ PRED_START; модель бачить лише цілі, відомі до refit."""
     out = pd.Series(np.nan, index=df.index)
     refit = PRED_START
@@ -49,11 +49,11 @@ def walk_forward(df: pd.DataFrame, h: int) -> pd.Series:
         tr = df[df["hour_utc"] + h * H <= refit]                      # purge: ціль відома до refit
         te_mask = (df["hour_utc"] >= refit) & (df["hour_utc"] < refit + REFIT_EVERY)
         if te_mask.any():
-            ds = lgb.Dataset(tr[COLS], tr["target"], init_score=_logit(tr["markov28"].to_numpy()),
+            ds = lgb.Dataset(tr[cols], tr["target"], init_score=_logit(tr["markov28"].to_numpy()),
                              categorical_feature=["oblast"])
             booster = lgb.train(LGB_PARAMS, ds, num_boost_round=N_TREES)
             te = df[te_mask]
-            raw = booster.predict(te[COLS], raw_score=True)
+            raw = booster.predict(te[cols], raw_score=True)
             out[te_mask] = _sigmoid(raw + _logit(te["markov28"].to_numpy()))
         refit += REFIT_EVERY
     return out
@@ -88,11 +88,12 @@ def run(hourly, intervals, h: int) -> dict:
     masks, bounds = chrono_split(df, h)
 
     preds = {"clim": df["clim"], "markov28": df["markov28"]}
-    preds["wf_raw"] = walk_forward(df, h)
-    cal = {W: online_platt(df, preds["wf_raw"], h, W) for W in CAL_WINDOWS}
-    for W, p in cal.items():
-        preds[f"wf_cal{W}"] = p
-    preds["wf_cal_ens"] = pd.concat(cal.values(), axis=1).mean(axis=1, skipna=False)
+    for fs in BT_SETS:
+        raw = preds[f"wf_{fs}_raw"] = walk_forward(df, h, FEATURE_SETS[fs])
+        cal = {W: online_platt(df, raw, h, W) for W in CAL_WINDOWS}
+        for W, p in cal.items():
+            preds[f"wf_{fs}_cal{W}"] = p
+        preds[f"wf_{fs}_ens"] = pd.concat(cal.values(), axis=1).mean(axis=1, skipna=False)
 
     res = {}
     for split in ("val", "test"):
@@ -109,7 +110,10 @@ def run(hourly, intervals, h: int) -> dict:
     d, p, tm = res["test"]
     onset = (d["active_now"] == 0).to_numpy()
     boot = []
-    for a, b in [(sel, "markov28"), (sel, "wf_raw"), (sel, "clim"), ("wf_raw", "markov28")]:
+    sel_raw = "_".join(sel.split("_")[:2]) + "_raw"
+    pairs = [(sel, "markov28"), (sel, "clim"), (sel, sel_raw),
+             ("wf_L1.5S_ens", "wf_L1.5_ens"), ("wf_L1.5S_raw", "wf_L1.5_raw")]
+    for a, b in pairs:
         if a == b:
             continue
         for sl, m in (("all", None), ("onset", onset)):
@@ -117,14 +121,25 @@ def run(hourly, intervals, h: int) -> dict:
             boot.append({"h": h, "slice": sl, "A": a, "B": b, "dBrier": dd, "ci_lo": lo, "ci_hi": hi})
 
     # бектест по тижнях: BSS vs markov28 у зрізі onset за весь walk-forward період
-    full = df.assign(**{k: v for k, v in preds.items()}).dropna(subset=["wf_cal_ens"])
-    full = full[full["active_now"] == 0]
+    cmp = ["wf_L1.5_ens", "wf_L1.5S_ens"]
+    # лише рядки, де є ВСІ порівнювані прогнози (ансамбль з'являється після 56 днів історії)
+    full = df.assign(**{k: v for k, v in preds.items()}).dropna(subset=cmp + [sel]).reset_index(drop=True)
+
+    # bootstrap за ВЕСЬ walk-forward період (≈7 міс., усі прогнози out-of-sample):
+    # 4 тижні test замалі, щоб розрізнити ефект ~0.001 Brier. Вибір варіанта робився на val,
+    # який входить у цей період, → легкий оптимізм для `sel`.
+    on = (full["active_now"] == 0).to_numpy()
+    for a, b in [(sel, "markov28"), ("wf_L1.5S_ens", "wf_L1.5_ens"), ("wf_L1.5_ens", "markov28")]:
+        dd, lo, hi = block_bootstrap_diff(full, full[a].to_numpy(), full[b].to_numpy(), on)
+        boot.append({"h": h, "slice": "onset, весь бектест", "A": a, "B": b,
+                     "dBrier": dd, "ci_lo": lo, "ci_hi": hi})
+    full = full[on]
     week = full["hour_utc"].dt.tz_convert(None).dt.to_period("W").dt.start_time
     se = lambda c: (full[c] - full["target"]) ** 2
-    weekly = pd.DataFrame({"week": week, "markov28": se("markov28"), "wf_raw": se("wf_raw"),
-                           sel: se(sel), "base_rate": full["target"]}).groupby("week").mean()
-    weekly[f"bss_raw"] = 1 - weekly["wf_raw"] / weekly["markov28"]
-    weekly[f"bss_sel"] = 1 - weekly[sel] / weekly["markov28"]
+    weekly = pd.DataFrame({"week": week, "base_rate": full["target"], "markov28": se("markov28"),
+                           **{c: se(c) for c in cmp}}).groupby("week").mean()
+    for c in cmp:
+        weekly[f"bss_{c}"] = 1 - weekly[c] / weekly["markov28"]
 
     rel = reliability_table(d["target"].to_numpy()[onset], p[sel][onset]).assign(h=h, model=sel)
     test_preds = d[["oblast", "hour_utc", "active_now", "target"]].assign(**p)
@@ -150,7 +165,7 @@ def main(hs: list[int]) -> None:
     meta = json.loads((PROC_DIR / "meta_volunteer.json").read_text())
     lines = ["# Walk-forward бектест + онлайн-рекалібрування",
              f"\nЗнімок {meta['snapshot_utc']}. Перенавчання моделі кожні 7 днів з {PRED_START:%Y-%m-%d}; "
-             f"Platt щодоби на вікнах {CAL_WINDOWS} днів; `wf_cal_ens` = середнє за вікнами. "
+             f"Platt щодоби на вікнах {CAL_WINDOWS} днів; `wf_<набір>_ens` = середнє за вікнами. "
              "Вибір — за val onset log-loss."]
     for h in hs:
         print(f"--- h={h}")
@@ -172,7 +187,7 @@ def main(hs: list[int]) -> None:
                   "\n### ΔBrier на test, 95% CI (block bootstrap; < 0 = A краща)\n",
                   r["boot"][["slice", "A", "B", "dBrier", "ci_lo", "ci_hi"]].to_markdown(index=False, floatfmt=".5f"),
                   "\n### Бектест по тижнях (onset): BSS відносно markov28\n",
-                  r["weekly"][["base_rate", "bss_raw", "bss_sel"]].to_markdown(floatfmt=".3f"),
+                  r["weekly"][["base_rate", "bss_wf_L1.5_ens", "bss_wf_L1.5S_ens"]].to_markdown(floatfmt=".3f"),
                   "\n### Reliability обраної моделі на test (onset)\n",
                   r["rel"][["bin", "p_mean", "y_rate", "n"]].to_markdown(index=False, floatfmt=".3f")]
     (REPORT_DIR / "backtest_summary.md").write_text("\n".join(lines) + "\n")
