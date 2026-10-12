@@ -70,7 +70,7 @@ def to_frame(rows: list[dict]) -> pd.DataFrame:
 
 def merge(old: pd.DataFrame, new: pd.DataFrame) -> pd.DataFrame:
     """Свіжо завантажені версії постів мають пріоритет (могли бути відредаговані)."""
-    df = pd.concat([old, new], ignore_index=True)
+    df = pd.concat([x for x in (old, new) if len(x)], ignore_index=True) if len(old) or len(new) else new
     df = df.drop_duplicates("msg_id", keep="last")
     return df.sort_values("date_utc").reset_index(drop=True)
 
