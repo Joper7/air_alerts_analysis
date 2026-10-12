@@ -148,10 +148,13 @@ def run(hourly, intervals, h: int, posts=None) -> dict:
 
     rel = reliability_table(d["target"].to_numpy()[onset], p[sel][onset]).assign(h=h, model=sel)
     test_preds = d[["oblast", "hour_utc", "active_now", "target"]].assign(**p)
+    # усі out-of-sample прогнози walk-forward (для кривої якості за горизонтом і графіків)
+    wf_all = df[["oblast", "hour_utc", "active_now", "target"]].assign(
+        **{k: v.to_numpy() for k, v in preds.items()}).dropna(subset=cmp)
     return dict(val=vm.assign(selected=lambda x: x["model"] == sel),
                 test=tm.assign(selected=lambda x: x["model"] == sel),
                 boot=pd.DataFrame(boot), weekly=weekly, rel=rel, sel=sel,
-                preds=test_preds, bounds=bounds)
+                preds=test_preds, bounds=bounds, wf_all=wf_all)
 
 
 def _table(m: pd.DataFrame) -> str:
@@ -186,6 +189,7 @@ def main(hs: list[int]) -> None:
         r["weekly"].to_csv(REPORT_DIR / f"backtest_weekly_{sfx}.csv")
         r["rel"].to_csv(REPORT_DIR / f"backtest_reliability_{sfx}.csv", index=False)
         r["preds"].to_parquet(REPORT_DIR / f"backtest_preds_{sfx}.parquet", index=False)
+        r["wf_all"].to_parquet(REPORT_DIR / f"backtest_wf_{sfx}.parquet", index=False)
         b = r["bounds"]
         lines += [f"\n## h = {h} — обрано за val: `{r['sel']}`",
                   f"val {b['val_start']:%Y-%m-%d} → {b['test_start']:%Y-%m-%d}, "
