@@ -33,6 +33,7 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 from src.evaluate import (block_bootstrap_diff, chrono_split, evaluate, markov_fit,
                           markov_predict, reliability_table)
+from src.data_loader import REFORM_END
 from src.features import FEATURE_SETS, make_features
 
 PROC_DIR = Path("data/processed")
@@ -107,8 +108,25 @@ def make_logreg(cols: list[str]):
 
 
 # ---------------------------------------------------------------- one horizon
-def run_horizon(hourly, intervals, h: int, kind: str = "window") -> dict:
-    df = make_features(hourly, intervals, h, kind)
+def load_posts() -> pd.DataFrame | None:
+    """Пости @kpszsu (src/telegram_web.py); без них набір L1.5GT пропускається."""
+    path = Path("data/raw/telegram/kpszsu_web.parquet")
+    if not path.exists():
+        return None
+    posts = pd.read_parquet(path)
+    if posts["date_utc"].min() > REFORM_END - pd.Timedelta(days=1):   # неповна історія → не використовуємо
+        print(f"Telegram: історія лише з {posts['date_utc'].min():%Y-%m-%d} — набір L1.5GT пропущено")
+        return None
+    return posts
+
+
+def active_sets(posts) -> dict:
+    return {k: v for k, v in FEATURE_SETS.items() if posts is not None or k != "L1.5GT"}
+
+
+def run_horizon(hourly, intervals, h: int, kind: str = "window", posts=None) -> dict:
+    df = make_features(hourly, intervals, h, kind, posts=posts)
+    sets = active_sets(posts)
     masks, bounds = chrono_split(df, h)
     tr, va, te = (df[masks[k]].reset_index(drop=True) for k in ("train", "val", "test"))
     trva = pd.concat([tr, va], ignore_index=True)
@@ -122,7 +140,7 @@ def run_horizon(hourly, intervals, h: int, kind: str = "window") -> dict:
 
     # LightGBM: абляція L1 → L1.5 × варіанти
     importance, best_iters = {}, {}
-    for fs, cols in FEATURE_SETS.items():
+    for fs, cols in sets.items():
         for vname, v in VARIANTS.items():
             name = f"lgb_{fs}_{vname}"
             booster, best = fit_lgb(tr, va, cols, **v)
@@ -146,7 +164,7 @@ def run_horizon(hourly, intervals, h: int, kind: str = "window") -> dict:
     cand = val_m[(val_m["slice"] == "onset") & val_m["model"].str.startswith("lgb_L1.5")]
     sel = cand.sort_values("logloss")["model"].iloc[0]
     variant = "_".join(sel.split("_")[2:])                 # абляція: той самий варіант на інших наборах
-    ablation = [f"lgb_{fs}_{variant}" for fs in FEATURE_SETS]
+    ablation = [f"lgb_{fs}_{variant}" for fs in sets]
     for m in (val_m, test_m):
         m["selected"] = m["model"] == sel
 
@@ -190,6 +208,7 @@ def _fmt_table(m: pd.DataFrame) -> str:
 def main(hs: list[int]) -> None:
     hourly = pd.read_parquet(PROC_DIR / "hourly_volunteer.parquet")
     intervals = pd.read_parquet(PROC_DIR / "intervals_volunteer.parquet")
+    posts = load_posts()
     meta = json.loads((PROC_DIR / "meta_volunteer.json").read_text())
     REPORT_DIR.mkdir(exist_ok=True)
 
@@ -197,7 +216,7 @@ def main(hs: list[int]) -> None:
     for h in hs:
         kind = "window" if h <= 3 else "point"
         print(f"--- h={h} ({kind})")
-        res[h] = r = run_horizon(hourly, intervals, h, kind)
+        res[h] = r = run_horizon(hourly, intervals, h, kind, posts)
         print(json.dumps(r["info"], ensure_ascii=False))
         print(r["test"].pivot_table(index="model", columns="slice", values="brier").round(4))
         print(r["val"].pivot_table(index="model", columns="slice", values="logloss").round(4))

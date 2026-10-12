@@ -19,6 +19,7 @@ import numpy as np
 import pandas as pd
 
 from src.data_loader import KYIV_TZ, REFORM_END
+from src.text_features import TG_COLS, tg_features
 
 SCOPE = ["Kyiv City", "Kyivska oblast", "Cherkaska oblast", "Kirovohradska oblast"]
 
@@ -69,7 +70,8 @@ GEO_OBLASTS = [
 _slug = lambda ob: ob.replace(" oblast", "").replace(" ", "_").replace("-", "_").lower()
 GEO_COLS = [f"g_act_{_slug(o)}" for o in GEO_OBLASTS] + [f"g_ss_{_slug(o)}" for o in GEO_OBLASTS]
 FEATURE_SETS = {"L1": L1_COLS, "L1.5": L1_COLS + L15_COLS, "L1.5S": L1_COLS + L15_COLS + SERIES_COLS,
-                "L1.5G": L1_COLS + L15_COLS + GEO_COLS}
+                "L1.5G": L1_COLS + L15_COLS + GEO_COLS,
+                "L1.5GT": L1_COLS + L15_COLS + GEO_COLS + TG_COLS}   # T — Telegram (потрібні posts)
 ADAY_OFFSET = pd.Timedelta(hours=9)     # доба атаки = [09:00 UTC, 09:00 UTC наступного дня)
 AVG_LEN_PRIOR = 2.5                     # середня довжина важкої серії до появи історії
 
@@ -207,10 +209,11 @@ def series_features(Mn: pd.DataFrame, origins: pd.DatetimeIndex) -> tuple[pd.Dat
 # ---------------------------------------------------------------- датасет
 def make_features(hourly: pd.DataFrame, intervals: pd.DataFrame, h: int,
                   kind: str = "window", scope: list[str] = SCOPE,
-                  start: pd.Timestamp = REFORM_END) -> pd.DataFrame:
+                  start: pd.Timestamp = REFORM_END, posts: pd.DataFrame | None = None) -> pd.DataFrame:
     """
     -> довгий датасет: один рядок = (oblast, origin t), ознаки L1+L1.5, `target`, `clim`.
     hourly — вихід data_loader (усі області: потрібні для сусідів і глобальних ознак).
+    posts  — пости @kpszsu (src/telegram_web.py); якщо None, ознак TG_COLS немає.
     """
     hourly = hourly[hourly["hour_utc"] >= start - pd.Timedelta(days=HISTORY_DAYS)]
     A = hourly.pivot(index="hour_utc", columns="oblast", values="alert").astype(float)
@@ -243,6 +246,8 @@ def make_features(hourly: pd.DataFrame, intervals: pd.DataFrame, h: int,
         ss = st["since_start"][o] if o in st["since_start"] else pd.Series(np.nan, index=origins)
         geo[f"g_act_{_slug(o)}"] = act.to_numpy()
         geo[f"g_ss_{_slug(o)}"] = np.log1p(ss.fillna(48 * 60).clip(upper=48 * 60)).to_numpy()
+
+    tg_glob, tg_obl = tg_features(posts, origins, scope, NEIGHBORS) if posts is not None else (None, None)
 
     local_t = origins.tz_convert(KYIV_TZ)
     local_tgt = (origins + (h - 1) * H).tz_convert(KYIV_TZ)   # календар цільової години — детермінований
@@ -283,6 +288,9 @@ def make_features(hourly: pd.DataFrame, intervals: pd.DataFrame, h: int,
             **geo,
             "target": target[ob],
         }
+        if posts is not None:   # T
+            d.update({k: tg_glob[k] for k in tg_glob.columns})
+            d.update({k: tg_obl[ob][k] for k in tg_obl[ob].columns})
         f = pd.DataFrame(d, index=origins).reset_index(drop=True)
         f["oblast"] = ob
         frames.append(f)

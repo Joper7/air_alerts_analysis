@@ -29,14 +29,14 @@ from sklearn.linear_model import LogisticRegression
 
 from src.evaluate import block_bootstrap_diff, chrono_split, evaluate, reliability_table
 from src.features import FEATURE_SETS, make_features
-from src.train import LGB_PARAMS, PROC_DIR, REPORT_DIR, _logit, _sigmoid
+from src.train import LGB_PARAMS, PROC_DIR, REPORT_DIR, _logit, _sigmoid, load_posts
 
 H = pd.Timedelta(hours=1)
 PRED_START = pd.Timestamp("2026-02-01", tz="UTC")   # ≈3 міс. історії для першої моделі
 REFIT_EVERY = pd.Timedelta(days=7)
 N_TREES = 150
 CAL_WINDOWS = (7, 14, 28, 56)
-BT_SETS = ("L1.5", "L1.5S", "L1.5G")
+BT_SETS = ["L1.5", "L1.5S", "L1.5G"]     # + "L1.5GT", якщо є пости Telegram (див. main)
 
 
 # ---------------------------------------------------------------- walk-forward
@@ -83,8 +83,9 @@ def online_platt(df: pd.DataFrame, p_raw: pd.Series, h: int, window_days: int) -
 
 
 # ---------------------------------------------------------------- one horizon
-def run(hourly, intervals, h: int) -> dict:
-    df = make_features(hourly, intervals, h)
+def run(hourly, intervals, h: int, posts=None) -> dict:
+    kind = "window" if h <= 3 else "point"         # h ≥ 6: ціль — тривога в годину t+h (див. CLAUDE.md)
+    df = make_features(hourly, intervals, h, kind, posts=posts)
     masks, bounds = chrono_split(df, h)
 
     preds = {"clim": df["clim"], "markov28": df["markov28"]}
@@ -129,8 +130,11 @@ def run(hourly, intervals, h: int) -> dict:
     # 4 тижні test замалі, щоб розрізнити ефект ~0.001 Brier. Вибір варіанта робився на val,
     # який входить у цей період, → легкий оптимізм для `sel`.
     on = (full["active_now"] == 0).to_numpy()
-    for a, b in [(sel, "markov28"), ("wf_L1.5_ens", "markov28"), ("wf_L1.5S_ens", "wf_L1.5_ens"),
-                 ("wf_L1.5G_ens", "wf_L1.5_ens"), ("wf_L1.5G_ens", "markov28")]:
+    full_pairs = [(sel, "markov28"), ("wf_L1.5_ens", "markov28"), ("wf_L1.5S_ens", "wf_L1.5_ens"),
+                  ("wf_L1.5G_ens", "wf_L1.5_ens"), ("wf_L1.5G_ens", "markov28")]
+    if "L1.5GT" in BT_SETS:
+        full_pairs += [("wf_L1.5GT_ens", "wf_L1.5G_ens"), ("wf_L1.5GT_ens", "markov28")]
+    for a, b in full_pairs:
         dd, lo, hi = block_bootstrap_diff(full, full[a].to_numpy(), full[b].to_numpy(), on)
         boot.append({"h": h, "slice": "onset, весь бектест", "A": a, "B": b,
                      "dBrier": dd, "ci_lo": lo, "ci_hi": hi})
@@ -163,6 +167,9 @@ def _table(m: pd.DataFrame) -> str:
 def main(hs: list[int]) -> None:
     hourly = pd.read_parquet(PROC_DIR / "hourly_volunteer.parquet")
     intervals = pd.read_parquet(PROC_DIR / "intervals_volunteer.parquet")
+    posts = load_posts()
+    if posts is not None and "L1.5GT" not in BT_SETS:
+        BT_SETS.append("L1.5GT")
     meta = json.loads((PROC_DIR / "meta_volunteer.json").read_text())
     lines = ["# Walk-forward бектест + онлайн-рекалібрування",
              f"\nЗнімок {meta['snapshot_utc']}. Перенавчання моделі кожні 7 днів з {PRED_START:%Y-%m-%d}; "
@@ -170,7 +177,7 @@ def main(hs: list[int]) -> None:
              "Вибір — за val onset log-loss."]
     for h in hs:
         print(f"--- h={h}")
-        r = run(hourly, intervals, h)
+        r = run(hourly, intervals, h, posts)
         print("selected:", r["sel"])
         print(r["test"].pivot_table(index="model", columns="slice", values="brier").round(4))
         sfx = f"h{h}"
@@ -191,8 +198,9 @@ def main(hs: list[int]) -> None:
                   r["weekly"][["base_rate"] + [f"bss_wf_{fs}_ens" for fs in BT_SETS]].to_markdown(floatfmt=".3f"),
                   "\n### Reliability обраної моделі на test (onset)\n",
                   r["rel"][["bin", "p_mean", "y_rate", "n"]].to_markdown(index=False, floatfmt=".3f")]
-    (REPORT_DIR / "backtest_summary.md").write_text("\n".join(lines) + "\n")
-    print(f"-> {REPORT_DIR}/backtest_summary.md")
+    name = "backtest_summary.md" if hs == [1, 3] else f"backtest_summary_h{'_'.join(map(str, hs))}.md"
+    (REPORT_DIR / name).write_text("\n".join(lines) + "\n")
+    print(f"-> {REPORT_DIR}/{name}")
 
 
 if __name__ == "__main__":

@@ -11,7 +11,8 @@ import pytest
 
 from src.data_loader import to_hourly
 from src.evaluate import chrono_split
-from src.features import FEATURE_SETS, make_features, make_target
+from src.features import FEATURE_SETS, NEIGHBORS, make_features, make_target
+from src.text_features import TG_COLS, tg_features
 
 PROC = Path("data/processed")
 U = lambda s: pd.Timestamp(s, tz="UTC")
@@ -69,7 +70,7 @@ def test_no_leakage_truncation(h):
     cut_h = to_hourly(cut, end=end)
     trunc = make_features(cut_h, cut, h, start=start)
 
-    cols = sorted({c for fs in FEATURE_SETS.values() for c in fs} - {"oblast"})
+    cols = sorted({c for fs in FEATURE_SETS.values() for c in fs} - {"oblast"} - set(TG_COLS))
     key = ["oblast", "hour_utc"]
     a = full[full["hour_utc"] <= t0].set_index(key)[cols].sort_index()
     b = trunc[trunc["hour_utc"] <= t0].set_index(key)[cols].sort_index()
@@ -79,3 +80,23 @@ def test_no_leakage_truncation(h):
     # санітарна перевірка: після t0 ознаки МАЮТЬ розходитись, інакше обрізання не спрацювало
     later = lambda d: d[d["hour_utc"] > t0 + pd.Timedelta(hours=24)].set_index(key)[cols].sort_index()
     assert ((later(full) - later(trunc)).abs().max() > 0).any()
+
+
+# ---------------------------------------------------------------- Telegram: буфер і обрізання
+def test_tg_buffer_and_truncation():
+    """Пост за 3 хв до t НЕ рахується (буфер 5 хв); за 10 хв — рахується; пости після t0 не впливають."""
+    t = U("2026-01-01 12:00")
+    posts = pd.DataFrame({
+        "msg_id": [1, 2, 3, 4],
+        "date_utc": [t - pd.Timedelta(minutes=10), t - pd.Timedelta(minutes=3),
+                     t + pd.Timedelta(minutes=30), t - pd.Timedelta(minutes=20)],
+        "edited": [False, False, False, True],
+        "text": ["🛵 БпЛА курсом на Бровари", "🛵 БпЛА на Київ", "🚀 Балістика на Київ", "🛵 Біла Церква"],
+    })
+    origins = pd.DatetimeIndex([t, t + pd.Timedelta(hours=1)])
+    g, per = tg_features(posts, origins, ["Kyiv City", "Kyivska oblast"], NEIGHBORS)
+    assert g.loc[t, "tg_n_30m"] == 1                       # лише пост №1 (№2 у буфері, №4 edited)
+    assert per["Kyivska oblast"].loc[t, "tg_self_30m"] == 1 and per["Kyiv City"].loc[t, "tg_self_30m"] == 0
+    assert g.loc[t, "tg_ballistic_1h"] == 0                # пост з майбутнього не видно
+    g2, per2 = tg_features(posts[posts["date_utc"] < t], origins[:1], ["Kyiv City", "Kyivska oblast"], NEIGHBORS)
+    assert (g2.loc[t] == g.loc[t]).all() and (per2["Kyiv City"].loc[t] == per["Kyiv City"].loc[t]).all()
