@@ -88,13 +88,14 @@ def skill_curve(models: list[str]):
     r.to_csv(REPORT_DIR / "skill_curve.csv", index=False)
     fig, ax = plt.subplots(figsize=(8, 4))
     ax.axhline(0, color=INK2, lw=1)
-    ax.text(HS[-1], 0.002, "онлайн-Markov (бейзлайн)", ha="right", va="bottom", color=INK2, fontsize=9)
+    ax.text(1.0, -0.004, "0 = онлайн-Markov (бейзлайн)", ha="left", va="top", color=INK2, fontsize=9)
     present = [m for m in models + ["clim"] if m in set(r["model"])]
     for i, m in enumerate(present):
         x = r[r["model"] == m]
         c = SERIES[i] if m != "clim" else "#8a8984"
         lab = LABELS.get(m, "кліматологія")
-        ax.errorbar(x["h"], x["bss"], yerr=[x["bss"] - x["lo"], x["hi"] - x["bss"]], color=c, lw=2,
+        jitter = 1 + 0.035 * (i - (len(present) - 1) / 2)       # розвести CI серій по горизонталі
+        ax.errorbar(x["h"] * jitter, x["bss"], yerr=[x["bss"] - x["lo"], x["hi"] - x["bss"]], color=c, lw=2,
                     marker="o", ms=5, capsize=3, label=lab, ls="--" if m == "clim" else "-")
     ax.set_xscale("log")
     ax.set_xticks(HS, [str(h) for h in HS])
