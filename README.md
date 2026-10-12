@@ -138,7 +138,8 @@ ECE фінальної моделі на test: 0.017 (h=1), 0.031 (h=3). На 4 
 ```bash
 pip install -r requirements.txt
 python -m src.data_loader volunteer --force          # свіжі CSV → data/processed/
-python -m src.telegram_web kpszsu --since 2025-10-25 # ~40 хв, без логіну → data/raw/telegram/
+python -m src.telegram_web kpszsu --since 2025-10-25 # ~40 хв, без логіну; повтор = докачка нових постів
+# або (краще, з часом редагування постів) — Telethon, див. розділ «Telegram через Telethon»
 pytest -q tests/                                     # тести вирівнювання і витоку даних
 python -m src.train 1 3                              # train/val/test, абляція (reports/summary_h1_3.md)
 python -m src.backtest 1 3                           # walk-forward (reports/backtest_summary.md)
@@ -156,6 +157,31 @@ python -m src.plots                                  # reports/figures/
 | `src/backtest.py` | walk-forward, онлайн-рекалібрування, ансамбль |
 | `src/telegram_scraper.py` | альтернативний збір через Telethon (з логіном) |
 | `CLAUDE.md` | постановка, правила і повний журнал рішень |
+
+## Telegram через Telethon (офіційний API)
+
+Веб-прев'ю не показує, коли пост редагували. Telethon віддає `edit_date`, і тоді
+`available_at = edit_date`: відредагований текст враховується лише з моменту редагування. Якщо поруч
+лежить `data/raw/telegram/kpszsu.parquet` (Telethon), пайплайн бере його замість веб-версії.
+
+1. Отримати `api_id` і `api_hash`: https://my.telegram.org/apps → *API development tools*.
+2. `pip install telethon` (якщо падає збірка `pyaes`, спершу `pip install -U pip setuptools wheel`).
+3. Задати ключі й запустити з кореня репозиторію:
+   ```powershell
+   # Windows PowerShell
+   $env:TG_API_ID="12345"; $env:TG_API_HASH="abc..."
+   python -m src.telegram_scraper kpszsu --since 2025-10-25
+   ```
+   ```bash
+   # Linux / macOS
+   export TG_API_ID=12345 TG_API_HASH=abc...
+   python -m src.telegram_scraper kpszsu --since 2025-10-25
+   ```
+   Перший запуск попросить номер телефону і код з Telegram (вводите лише у своєму терміналі).
+   Повторний запуск докачує тільки нові пости. Наприкінці скрипт друкує статистику редагувань.
+4. `air_alerts_session.session` — це повний доступ до акаунта. Файл у `.gitignore`, **не комітьте його й нікому не передавайте**.
+   Сам `kpszsu.parquet` містить лише публічні пости каналу. Щоб запустити пайплайн на ньому в іншому
+   середовищі: `git add -f data/raw/telegram/kpszsu.parquet`.
 
 ## Рефлексія
 

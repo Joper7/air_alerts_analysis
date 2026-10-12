@@ -65,9 +65,17 @@ TG_COLS = GLOBAL_COLS + OBLAST_COLS
 
 
 def prepare_posts(posts: pd.DataFrame) -> pd.DataFrame:
-    """Відкидає відредаговані/порожні пости, додає прапорці типів і згадок областей."""
-    p = posts[~posts["edited"] & (posts["text"].str.len() > 0)].copy()
-    p["available_at"] = pd.to_datetime(p["date_utc"], utc=True)     # час публікації
+    """
+    Час доступності поста + прапорці типів і згадок областей.
+      Telethon (є колонка available_at = edit_date або date): беремо її, відредаговані НЕ відкидаємо;
+      веб-прев'ю (часу редагування немає): available_at = date_utc, відредаговані відкидаємо.
+    """
+    p = posts[posts["text"].fillna("").str.len() > 0].copy()
+    if "available_at" in p and p["available_at"].notna().all():
+        p["available_at"] = pd.to_datetime(p["available_at"], utc=True)
+    else:
+        p = p[~p["edited"].astype(bool)]
+        p["available_at"] = pd.to_datetime(p["date_utc"], utc=True)
     low = p["text"].str.lower().str.replace(r"\s+", " ", regex=True)   # nbsp і переноси → пробіл
     for k, pat in TYPE_PATTERNS.items():
         p[f"t_{k}"] = low.str.contains(pat, regex=True)

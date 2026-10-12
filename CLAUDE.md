@@ -82,8 +82,10 @@ Baselines (усі онлайн, тільки цілі, спостережені 
 - `naive=True` записи — тривалість штучна → виключити з цілі або вважати цензурованими. Тривоги, незакриті на кінець даних, — цензуровані.
 - **Ризик leakage:** кількість запущених шахедів/ракет ПС ЗСУ публікує ПІСЛЯ атаки → для поточної тривоги недоступна. Легально лише: підсумки *попередніх* атак, або онлайн-повідомлення «N шахедів курсом на …» з `available_at < t`.
 
-## Telegram (`src/telegram_scraper.py` — НЕ протестовано, лише синтаксис)
-Запуск тільки локально (Telethon + логін телефоном): `export TG_API_ID=... TG_API_HASH=...`, потім `python -m src.telegram_scraper kpszsu war_monitor --since 2025-01-01` → `data/raw/telegram/<ch>.parquet` (`date_utc, edit_date_utc, available_at, is_forward, views, text`).
+## Telegram
+Два способи збору, однаковий формат для `src/text_features.py`:
+- `src/telegram_web.py` — веб-прев'ю t.me/s/, без логіну, працює в хмарі → `data/raw/telegram/<ch>_web.parquet`; часу редагування немає → відредаговані відкидаються. Повторний запуск докачує нові пости.
+- `src/telegram_scraper.py` — Telethon, ТІЛЬКИ локально (логін телефоном): `export TG_API_ID=... TG_API_HASH=...`, потім `python -m src.telegram_scraper kpszsu --since 2025-10-25` → `data/raw/telegram/<ch>.parquet` (`channel, msg_id, date_utc, edit_date_utc, available_at, edited, is_forward, text`); `available_at = edit_date`; інкрементний; друкує статистику редагувань. Логіка конвертації протестована на фейкових Message, реальний логін — НЕ протестований (у хмарі неможливий). `load_posts()` бере Telethon-файл, якщо він є.
 Канали: `@kpszsu` (офіційний), моніторингові (`@war_monitor`, `@vanek_nikolaev` — хендли НЕ верифіковані).
 Правила leakage для тексту:
 1. Фіча в момент t — тільки пости з `available_at < t − buffer` (buffer ≈ 5 хв на затримки).

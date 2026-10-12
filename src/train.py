@@ -109,11 +109,16 @@ def make_logreg(cols: list[str]):
 
 # ---------------------------------------------------------------- one horizon
 def load_posts() -> pd.DataFrame | None:
-    """Пости @kpszsu (src/telegram_web.py); без них набір L1.5GT пропускається."""
-    path = Path("data/raw/telegram/kpszsu_web.parquet")
-    if not path.exists():
+    """
+    Пости @kpszsu; без них набір L1.5GT пропускається.
+    Пріоритет: Telethon (kpszsu.parquet, з часом редагування) → веб-прев'ю (kpszsu_web.parquet).
+    """
+    tg = Path("data/raw/telegram")
+    path = next((p for p in (tg / "kpszsu.parquet", tg / "kpszsu_web.parquet") if p.exists()), None)
+    if path is None:
         return None
     posts = pd.read_parquet(path)
+    print(f"Telegram: {path.name}, {len(posts)} постів")
     if posts["date_utc"].min() > REFORM_END - pd.Timedelta(days=1):   # неповна історія → не використовуємо
         print(f"Telegram: історія лише з {posts['date_utc'].min():%Y-%m-%d} — набір L1.5GT пропущено")
         return None

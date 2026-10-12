@@ -11,7 +11,7 @@
   - фіча в момент t бере лише пости з available_at < t − 5 хв;
   - видалені пости відсутні (survivorship bias) — описати в обмеженнях.
 
-Запуск:  python -m src.telegram_web kpszsu --since 2025-10-25
+Запуск:  python -m src.telegram_web kpszsu --since 2025-10-25   (повтор = докачка нових постів)
 Вихід:   data/raw/telegram/<channel>_web.parquet (дописується інкрементно, можна перезапускати)
 """
 from __future__ import annotations
@@ -72,8 +72,24 @@ def scrape(channel: str, since: str, pause: float = 1.0) -> Path:
     path = OUT_DIR / f"{channel}_web.parquet"
     since_ts = pd.Timestamp(since, tz="UTC")
     old = pd.read_parquet(path) if path.exists() else pd.DataFrame()
-    before = int(old["msg_id"].min()) if len(old) else None    # продовжуємо вниз від найстарішого
     sess, buf, n = requests.Session(), [], 0
+    if len(old):
+        # 1) докачка НОВИХ постів: від найновішої сторінки вниз до вже збереженого max id
+        top, before_new = int(old["msg_id"].max()), None
+        while True:
+            rows = parse_page(fetch(channel, before_new, sess))
+            fresh = [r for r in rows if r["msg_id"] > top]
+            buf += fresh
+            if not rows or len(fresh) < len(rows):
+                break
+            before_new = min(r["msg_id"] for r in rows)
+            time.sleep(pause)
+        old = _save(old, buf, path)
+        buf = []
+        print(f"нові пости: до {old['date_utc'].max()}, всього {len(old)}", flush=True)
+        if old["date_utc"].min() < since_ts:      # історія вже покрита до --since
+            return path
+    before = int(old["msg_id"].min()) if len(old) else None    # 2) продовжуємо вниз від найстарішого
     while True:
         rows = parse_page(fetch(channel, before, sess))
         if not rows:
