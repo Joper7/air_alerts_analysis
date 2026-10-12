@@ -7,6 +7,11 @@
 
 Запуск: python -m src.stock_model
 """
+import itertools
+
+import numpy as np
+import pandas as pd
+
 from src.launches_eda import parse_launches
 s = parse_launches(pd.read_parquet("data/raw/telegram/kpszsu.parquet"))
 s = s[s.index >= "2026-01-05"]                         # з понеділка
