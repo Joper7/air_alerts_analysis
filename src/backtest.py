@@ -36,7 +36,7 @@ PRED_START = pd.Timestamp("2026-02-01", tz="UTC")   # ≈3 міс. історі�
 REFIT_EVERY = pd.Timedelta(days=7)
 N_TREES = 150
 CAL_WINDOWS = (7, 14, 28, 56)
-BT_SETS = ("L1.5", "L1.5S")
+BT_SETS = ("L1.5", "L1.5S", "L1.5G")
 
 
 # ---------------------------------------------------------------- walk-forward
@@ -121,7 +121,7 @@ def run(hourly, intervals, h: int) -> dict:
             boot.append({"h": h, "slice": sl, "A": a, "B": b, "dBrier": dd, "ci_lo": lo, "ci_hi": hi})
 
     # бектест по тижнях: BSS vs markov28 у зрізі onset за весь walk-forward період
-    cmp = ["wf_L1.5_ens", "wf_L1.5S_ens"]
+    cmp = [f"wf_{fs}_ens" for fs in BT_SETS]
     # лише рядки, де є ВСІ порівнювані прогнози (ансамбль з'являється після 56 днів історії)
     full = df.assign(**{k: v for k, v in preds.items()}).dropna(subset=cmp + [sel]).reset_index(drop=True)
 
@@ -129,7 +129,8 @@ def run(hourly, intervals, h: int) -> dict:
     # 4 тижні test замалі, щоб розрізнити ефект ~0.001 Brier. Вибір варіанта робився на val,
     # який входить у цей період, → легкий оптимізм для `sel`.
     on = (full["active_now"] == 0).to_numpy()
-    for a, b in [(sel, "markov28"), ("wf_L1.5S_ens", "wf_L1.5_ens"), ("wf_L1.5_ens", "markov28")]:
+    for a, b in [(sel, "markov28"), ("wf_L1.5_ens", "markov28"), ("wf_L1.5S_ens", "wf_L1.5_ens"),
+                 ("wf_L1.5G_ens", "wf_L1.5_ens"), ("wf_L1.5G_ens", "markov28")]:
         dd, lo, hi = block_bootstrap_diff(full, full[a].to_numpy(), full[b].to_numpy(), on)
         boot.append({"h": h, "slice": "onset, весь бектест", "A": a, "B": b,
                      "dBrier": dd, "ci_lo": lo, "ci_hi": hi})
@@ -187,7 +188,7 @@ def main(hs: list[int]) -> None:
                   "\n### ΔBrier на test, 95% CI (block bootstrap; < 0 = A краща)\n",
                   r["boot"][["slice", "A", "B", "dBrier", "ci_lo", "ci_hi"]].to_markdown(index=False, floatfmt=".5f"),
                   "\n### Бектест по тижнях (onset): BSS відносно markov28\n",
-                  r["weekly"][["base_rate", "bss_wf_L1.5_ens", "bss_wf_L1.5S_ens"]].to_markdown(floatfmt=".3f"),
+                  r["weekly"][["base_rate"] + [f"bss_wf_{fs}_ens" for fs in BT_SETS]].to_markdown(floatfmt=".3f"),
                   "\n### Reliability обраної моделі на test (onset)\n",
                   r["rel"][["bin", "p_mean", "y_rate", "n"]].to_markdown(index=False, floatfmt=".3f")]
     (REPORT_DIR / "backtest_summary.md").write_text("\n".join(lines) + "\n")

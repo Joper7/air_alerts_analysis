@@ -57,7 +57,19 @@ L15_COLS = [
 # S — серії атак (по країні, «доба атаки» = полудень–полудень за Києвом)
 SERIES_COLS = ["nat_int_prev", "nat_int_today", "heavy_streak", "avg_heavy_len_90d",
                "streak_vs_avg", "obl_int_prev"]
-FEATURE_SETS = {"L1": L1_COLS, "L1.5": L1_COLS + L15_COLS, "L1.5S": L1_COLS + L15_COLS + SERIES_COLS}
+# G — повний вектор станів усіх областей (модель сама вчить маршрути загроз)
+GEO_OBLASTS = [
+    "Cherkaska oblast", "Chernihivska oblast", "Chernivetska oblast", "Dnipropetrovska oblast",
+    "Donetska oblast", "Ivano-Frankivska oblast", "Kharkivska oblast", "Khersonska oblast",
+    "Khmelnytska oblast", "Kirovohradska oblast", "Kyiv City", "Kyivska oblast", "Lvivska oblast",
+    "Mykolaivska oblast", "Odeska oblast", "Poltavska oblast", "Rivnenska oblast", "Sumska oblast",
+    "Ternopilska oblast", "Vinnytska oblast", "Volynska oblast", "Zakarpatska oblast",
+    "Zaporizka oblast", "Zhytomyrska oblast",
+]
+_slug = lambda ob: ob.replace(" oblast", "").replace(" ", "_").replace("-", "_").lower()
+GEO_COLS = [f"g_act_{_slug(o)}" for o in GEO_OBLASTS] + [f"g_ss_{_slug(o)}" for o in GEO_OBLASTS]
+FEATURE_SETS = {"L1": L1_COLS, "L1.5": L1_COLS + L15_COLS, "L1.5S": L1_COLS + L15_COLS + SERIES_COLS,
+                "L1.5G": L1_COLS + L15_COLS + GEO_COLS}
 ADAY_OFFSET = pd.Timedelta(hours=9)     # доба атаки = [09:00 UTC, 09:00 UTC наступного дня)
 AVG_LEN_PRIOR = 2.5                     # середня довжина важкої серії до появи історії
 
@@ -88,6 +100,7 @@ def interval_state(intervals: pd.DataFrame, origins: pd.DatetimeIndex) -> dict[s
             "active": active.astype(float),
             "elapsed": np.where(active, (T - s[j]) / _NS_MIN, 0.0),
             "since_end": np.where(active, 0.0, np.where(has, (T - e[j]) / _NS_MIN, np.nan)),
+            "since_start": np.where(has, (T - s[j]) / _NS_MIN, np.nan),
         }
         for w in (1, 3, 24, 168):
             res[f"starts_{w}h"] = (n_before - np.searchsorted(s, T - w * _NS_H, side="left")).astype(float)
@@ -223,6 +236,13 @@ def make_features(hourly: pd.DataFrame, intervals: pd.DataFrame, h: int,
     mass_count_14d = mass_onset.shift(1).rolling(24 * 14, min_periods=1).sum()
 
     ser_nat, ser_obl = series_features(Mn, origins)
+    # G: стан кожної області в момент t; log хвилин від останнього старту (обрізано 48 год)
+    geo = {}
+    for o in GEO_OBLASTS:
+        act = st["active"][o] if o in st["active"] else pd.Series(0.0, index=origins)
+        ss = st["since_start"][o] if o in st["since_start"] else pd.Series(np.nan, index=origins)
+        geo[f"g_act_{_slug(o)}"] = act.to_numpy()
+        geo[f"g_ss_{_slug(o)}"] = np.log1p(ss.fillna(48 * 60).clip(upper=48 * 60)).to_numpy()
 
     local_t = origins.tz_convert(KYIV_TZ)
     local_tgt = (origins + (h - 1) * H).tz_convert(KYIV_TZ)   # календар цільової години — детермінований
@@ -259,6 +279,8 @@ def make_features(hourly: pd.DataFrame, intervals: pd.DataFrame, h: int,
             # S
             **{k: ser_nat[k] for k in ser_nat.columns},
             "obl_int_prev": ser_obl[ob],
+            # G
+            **geo,
             "target": target[ob],
         }
         f = pd.DataFrame(d, index=origins).reset_index(drop=True)
